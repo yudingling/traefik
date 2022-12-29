@@ -89,9 +89,15 @@ func (r *retry) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		// Disable retries when the backend already received request data
 		trace := &httptrace.ClientTrace{
 			WroteHeaders: func() {
+				log.FromContext(middlewares.GetLoggerCtx(req.Context(), r.name, typeName)).
+					Debugf("Attempt %d for request WroteHeaders: %v", attempts, req.URL)
+
 				retryResponseWriter.DisableRetries()
 			},
 			WroteRequest: func(httptrace.WroteRequestInfo) {
+				log.FromContext(middlewares.GetLoggerCtx(req.Context(), r.name, typeName)).
+					Debugf("Attempt %d for request WroteRequest: %v", attempts, req.URL)
+
 				retryResponseWriter.DisableRetries()
 			},
 		}
@@ -100,6 +106,9 @@ func (r *retry) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		r.next.ServeHTTP(retryResponseWriter, req.WithContext(newCtx))
 
 		if !retryResponseWriter.ShouldRetry() {
+			log.FromContext(middlewares.GetLoggerCtx(req.Context(), r.name, typeName)).
+				Debugf("Attempt %d for request stop retry: %v", attempts, req.URL)
+
 			return nil
 		}
 
