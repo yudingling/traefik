@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -84,7 +85,7 @@ func (r *retry) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	operation := func() error {
 		shouldRetry := attempts < r.attempts
-		retryResponseWriter := newResponseWriter(rw, shouldRetry)
+		retryResponseWriter := newResponseWriter(rw, shouldRetry, req.URL)
 
 		// Disable retries when the backend already received request data
 		trace := &httptrace.ClientTrace{
@@ -163,13 +164,17 @@ type responseWriter interface {
 	http.Flusher
 	ShouldRetry() bool
 	DisableRetries()
+	EnableRetry()
+	IsRetryRequest() bool
 }
 
-func newResponseWriter(rw http.ResponseWriter, shouldRetry bool) responseWriter {
+func newResponseWriter(rw http.ResponseWriter, shouldRetry bool, url *url.URL) responseWriter {
 	responseWriter := &responseWriterWithoutCloseNotify{
 		responseWriter: rw,
 		headers:        make(http.Header),
 		shouldRetry:    shouldRetry,
+		url:            url,
+		isRetryRequest: shouldRetry,
 	}
 	if _, ok := rw.(http.CloseNotifier); ok {
 		return &responseWriterWithCloseNotify{
@@ -184,6 +189,8 @@ type responseWriterWithoutCloseNotify struct {
 	headers        http.Header
 	shouldRetry    bool
 	written        bool
+	url            *url.URL
+	isRetryRequest bool
 }
 
 func (r *responseWriterWithoutCloseNotify) ShouldRetry() bool {
@@ -192,6 +199,14 @@ func (r *responseWriterWithoutCloseNotify) ShouldRetry() bool {
 
 func (r *responseWriterWithoutCloseNotify) DisableRetries() {
 	r.shouldRetry = false
+}
+
+func (r *responseWriterWithoutCloseNotify) EnableRetry() {
+	r.shouldRetry = true
+}
+
+func (r *responseWriterWithoutCloseNotify) IsRetryRequest() bool {
+	return r.isRetryRequest
 }
 
 func (r *responseWriterWithoutCloseNotify) Header() http.Header {
@@ -209,6 +224,8 @@ func (r *responseWriterWithoutCloseNotify) Write(buf []byte) (int, error) {
 }
 
 func (r *responseWriterWithoutCloseNotify) WriteHeader(code int) {
+	log.WithoutContext().Debugf("http status: %d, WriteHeader for request WroteRequest: %v", code, r.url)
+
 	if r.ShouldRetry() && code == http.StatusServiceUnavailable {
 		// We get a 503 HTTP Status Code when there is no backend server in the pool
 		// to which the request could be sent.  Also, note that r.ShouldRetry()
@@ -216,6 +233,13 @@ func (r *responseWriterWithoutCloseNotify) WriteHeader(code int) {
 		// the backend server and so we can be sure that the 503 was produced
 		// inside Traefik already and we don't have to retry in this cases.
 		r.DisableRetries()
+	}
+
+	if r.IsRetryRequest() && code == http.StatusBadGateway {
+		//edit by zd
+		//502 Bad Gateway' caused by: EOF （connection reset by peer）
+		// when 502 is generated, WroteHeaders and WroteRequest have been triggered in httptrace, but at this time we need to retry this request
+		r.EnableRetry()
 	}
 
 	if r.ShouldRetry() {
