@@ -2,6 +2,7 @@ package retry
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -74,12 +75,15 @@ func (r *retry) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	closableBody := req.Body
-	defer closableBody.Close()
+	//closableBody := req.Body
+	//defer closableBody.Close()
+	//
+	//// if we might make multiple attempts, swap the body for an io.NopCloser
+	//// cf https://github.com/traefik/traefik/issues/1008
+	//req.Body = io.NopCloser(closableBody)
 
-	// if we might make multiple attempts, swap the body for an io.NopCloser
-	// cf https://github.com/traefik/traefik/issues/1008
-	req.Body = io.NopCloser(closableBody)
+	var bodySk = newBodySeeker(req.Body)
+	req.Body = bodySk
 
 	attempts := 1
 
@@ -112,6 +116,10 @@ func (r *retry) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 			return nil
 		}
+
+		//seek to 0
+		bodySk.Seek(0, io.SeekStart)
+		req.Body = bodySk
 
 		attempts++
 
@@ -279,4 +287,21 @@ type responseWriterWithCloseNotify struct {
 
 func (r *responseWriterWithCloseNotify) CloseNotify() <-chan bool {
 	return r.responseWriter.(http.CloseNotifier).CloseNotify()
+}
+
+type bodySeeker struct {
+	*bytes.Reader
+}
+
+// newBodySeeker returns a seekable io.ReadCloser from a request body.
+func newBodySeeker(body io.ReadCloser) *bodySeeker {
+	b, _ := io.ReadAll(body)
+	body.Close()
+
+	return &bodySeeker{bytes.NewReader(b)}
+}
+
+// Close has no effect
+func (*bodySeeker) Close() error {
+	return nil
 }

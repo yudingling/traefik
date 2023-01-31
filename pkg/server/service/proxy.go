@@ -104,6 +104,15 @@ func buildProxy(passHostHeader *bool, responseForwarding *dynamic.ResponseForwar
 			}
 
 			log.Debugf("'%d %s' caused by: %v", statusCode, statusText(statusCode), err)
+
+			if statusCode == http.StatusInternalServerError {
+				var errStr = err.Error()
+				if strings.Contains(errStr, "server closed idle connection") {
+					statusCode = http.StatusBadGateway
+					log.Debugf("'%d %s' caused by: %v, change status to StatusBadGateway", statusCode, statusText(statusCode), err)
+				}
+			}
+
 			w.WriteHeader(statusCode)
 			_, werr := w.Write([]byte(statusText(statusCode)))
 			if werr != nil {
