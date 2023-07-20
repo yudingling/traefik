@@ -239,10 +239,17 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request, next http
 		logDataTable.Request.size = crr.count
 	}
 
+	//先标记处理时间，再异步写入，避免异步写入日志的等待时间统计到 accesslog 中
+	h.markRoundTripInfo(logDataTable)
+
 	if h.config.BufferingSize > 0 {
-		h.logHandlerChan <- handlerParams{
-			logDataTable: logDataTable,
+		//如果chain 满了，则不走 chain，直接写日志
+		select {
+		case h.logHandlerChan <- handlerParams{logDataTable: logDataTable}:
+		default:
+			h.logTheRoundTrip(logDataTable)
 		}
+
 	} else {
 		h.logTheRoundTrip(logDataTable)
 	}
@@ -293,8 +300,7 @@ func usernameIfPresent(theURL *url.URL) string {
 	return "-"
 }
 
-// Logging handler to log frontend name, backend name, and elapsed time.
-func (h *Handler) logTheRoundTrip(logDataTable *LogData) {
+func (h *Handler) markRoundTripInfo(logDataTable *LogData) {
 	core := logDataTable.Core
 
 	retryAttempts, ok := core[RetryAttempts].(int)
@@ -311,21 +317,30 @@ func (h *Handler) logTheRoundTrip(logDataTable *LogData) {
 	totalDuration := time.Now().UTC().Sub(core[StartUTC].(time.Time))
 	core[Duration] = totalDuration
 
+	size := logDataTable.DownstreamResponse.size
+	core[DownstreamContentSize] = size
+	if original, ok := core[OriginContentSize]; ok {
+		o64 := original.(int64)
+		if size != o64 && size != 0 {
+			core[GzipRatio] = float64(o64) / float64(size)
+		}
+	}
+
+	core[Overhead] = totalDuration
+	if origin, ok := core[OriginDuration]; ok {
+		core[Overhead] = totalDuration - origin.(time.Duration)
+	}
+}
+
+// Logging handler to log frontend name, backend name, and elapsed time.
+func (h *Handler) logTheRoundTrip(logDataTable *LogData) {
+	core := logDataTable.Core
+
+	retryAttempts := core[RetryAttempts].(int)
+	status := logDataTable.DownstreamResponse.status
+	totalDuration := core[Duration].(time.Duration)
+
 	if h.keepAccessLog(status, retryAttempts, totalDuration) {
-		size := logDataTable.DownstreamResponse.size
-		core[DownstreamContentSize] = size
-		if original, ok := core[OriginContentSize]; ok {
-			o64 := original.(int64)
-			if size != o64 && size != 0 {
-				core[GzipRatio] = float64(o64) / float64(size)
-			}
-		}
-
-		core[Overhead] = totalDuration
-		if origin, ok := core[OriginDuration]; ok {
-			core[Overhead] = totalDuration - origin.(time.Duration)
-		}
-
 		fields := logrus.Fields{}
 
 		for k, v := range logDataTable.Core {
